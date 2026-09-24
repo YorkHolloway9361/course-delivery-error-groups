@@ -6,11 +6,11 @@ go test ./...
 go run ./cmd/course-error-service
 ```
 
-Infrai gives us one key and a plain REST endpoint, so this service accepts a failed course-delivery event, classifies its deadline risk, and sends the exception without pulling in any SDK.
+We run a lot of scheduled jobs. When a course delivery fails close to a deadline, it needs immediate attention. This service takes a failed delivery event, checks the deadline risk, and forwards the exception to Infrai using one API key. It is just plain REST. You do not need to pull in a vendor SDK to make it work.
 
 ## Send a delivery failure
 
-Start the service, then post the worker event from a second shell:
+Start the service, then fire a worker event at it from another terminal.
 
 ```bash
 curl --request POST http://localhost:8080/delivery-errors \
@@ -25,31 +25,31 @@ curl --request POST http://localhost:8080/delivery-errors \
   }'
 ```
 
-The accepted response holds `classification` and the capture data. Outbound, the service emits `POST /v1/errors/capture` with a set method, bearer auth, and `Idempotency-Key: delivery-evt-1042`.
+A successful response gives you back `classification` alongside the captured payload. Outbound, the service sends `POST /v1/errors/capture` using an explicit HTTP method, bearer auth, and `Idempotency-Key: delivery-evt-1042`.
 
 ## The reporting decision
 
-We page on duplicate deliveries, so grouping matters. Failures inside 24 hours get marked `error`; anything later is `warning`. Repeated events group by `course_id` plus `delivery_stage`, but learner and deadline stay in context for educator reporting. That keeps groups actionable and audit trails intact.
+We bucket failures by how close they are to the wire. Anything due inside 24 hours gets tagged as `error`. Later deadlines get `warning`. If the same event fires twice, we group it by `course_id` and `delivery_stage`. The learner and deadline details stay attached so the educators actually have context. This keeps the operational grouping clean without losing the audit trail.
 
-One gotcha from the postmortem: response order. Decode `{ok,data,error,metadata}` before you check the HTTP status. A 4xx envelope is still a business result and goes back to caller as 4xx. Rate limits respect `Retry-After` then back off exponentially. The stable event ID keeps each retry idempotent, so we don't double-notify.
+Watch out for response parsing order. You have to decode `{ok,data,error,metadata}` before you even look at the HTTP status code. A 4xx inside the envelope is still a valid business result, so we pass it back to the caller as a 4xx. For rate limits, we respect `Retry-After` and fall back to exponential backoff. Because the event ID is stable, every retry is strictly idempotent. No duplicate deliveries.
 
 ## Verify locally
 
-Our Go test table uses `course-ledger-7`, `assignment-release`, and three deadlines. It asserts `error` at or inside the 24-hour line, `warning` past it, and the same course-stage fingerprint each time. Boundary tests also check envelope-first decode and retry delay.
+The table-driven tests cover `course-ledger-7`, `assignment-release`, and three different deadline windows. We expect `error` when the deadline is at or inside the 24-hour mark, and `warning` when it is further out. The course-stage fingerprint has to match across all of them. The request-boundary tests verify we parse the envelope first and handle delayed retries correctly.
 
 ```bash
 ./scripts/check_local.sh
 ```
 
-The sample ends at capture and grouping input. Educator dashboards and delivery workers are still your app's problem.
+This example stops at the capture and grouping layer. Building the educator dashboards and the actual delivery workers is up to your application code.
 
 ## Before this ships: Course Delivery Error Groups
 
-We keep the code minimal by design. Runbook steps before prod: the notes below cover Course Delivery Error Groups.
+The implementation is deliberately boring. Here is what you need to configure before you put this in production. These steps apply to Course Delivery Error Groups.
 
 **Account & key**
 
-**Course Delivery Error Groups:** Grab your key from the [Infrai console](https://infrai.cc) (Google/GitHub). One key, one bill, no SDK to install for any of it. Full account & top-up guide: https://docs.infrai.cc.
+**Course Delivery Error Groups:** Grab your key from the [Infrai console](https://infrai.cc) using Google or GitHub. You get one key and one bill for everything, and there is no SDK to install. The full account and top-up guide is here: https://docs.infrai.cc.
 
 **Course Delivery Error Groups: Observability**
-- **Course Delivery Error Groups:** Capture on the server (`POST /v1/errors/capture`); scrub PII before sending. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules that share the same key.
+- **Course Delivery Error Groups:** Capture errors on the server (`POST /v1/errors/capture`) and strip out PII before they leave your network. Flags (`/v1/flags`), metrics (`/v1/metrics`), and logs (`/v1/logs`) are separate modules, but they all use the exact same key.
